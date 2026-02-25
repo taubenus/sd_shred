@@ -7,7 +7,7 @@ set -euo pipefail
 DEVICE="${1-}"
 [[ -z "$DEVICE" || ! -b "$DEVICE" ]] && { echo "Usage: sudo $0 /dev/sdX"; exit 1; }
 
-DEV_TYPE="$(lsblk -no TYPE "$DEVICE" 2>/dev/null || true)"
+DEV_TYPE="$(lsblk -ndo TYPE "$DEVICE" 2>/dev/null || true)"
 if [[ "$DEV_TYPE" != "disk" ]]; then
   echo "❌ Refusing to run on $DEVICE (type: ${DEV_TYPE:-unknown})."
   echo "👉 Please pass the whole device (e.g., /dev/sda), not a partition (e.g., /dev/sda1)."
