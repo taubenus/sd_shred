@@ -43,8 +43,35 @@ cryptsetup open --type plain \
   "$DEVICE" "$MAP"
 
 # One full pass. Zeros are fine; on disk they become indistinguishable-from-random.
-# oflag=direct avoids page cache; sync to be sure data is on the device.
-dd if=/dev/zero of="/dev/mapper/$MAP" bs=4M status=progress oflag=direct conv=fsync
+# Use an explicit size to avoid ENOSPC. oflag=direct avoids page cache; sync to be sure data is on the device.
+BS=$((4 * 1024 * 1024))
+DEV_BYTES="$(blockdev --getsize64 "$DEVICE")"
+SEC_BYTES="$(blockdev --getss "$DEVICE")"
+FULL_BLOCKS=$((DEV_BYTES / BS))
+REM_BYTES=$((DEV_BYTES % BS))
+ALIGN_REM=$((REM_BYTES % SEC_BYTES))
+
+echo "📐 Size: ${DEV_BYTES} bytes | bs=${BS} | full_blocks=${FULL_BLOCKS} | remainder=${REM_BYTES} bytes | sector=${SEC_BYTES}"
+if (( ALIGN_REM != 0 )); then
+  echo "⚠️  Device size is not a multiple of sector size; tail write will drop direct I/O."
+fi
+
+if (( FULL_BLOCKS > 0 )); then
+  dd if=/dev/zero of="/dev/mapper/$MAP" bs=$BS count=$FULL_BLOCKS status=progress oflag=direct conv=fsync
+fi
+
+if (( REM_BYTES > 0 )); then
+  REM_BLOCKS=$((REM_BYTES / SEC_BYTES))
+  SEEK_BLOCKS=$((FULL_BLOCKS * BS / SEC_BYTES))
+  if (( REM_BLOCKS > 0 )); then
+    dd if=/dev/zero of="/dev/mapper/$MAP" bs=$SEC_BYTES count=$REM_BLOCKS seek=$SEEK_BLOCKS oflag=direct conv=fsync status=none
+  fi
+  if (( ALIGN_REM != 0 )); then
+    TAIL_OFFSET=$((FULL_BLOCKS * BS + REM_BLOCKS * SEC_BYTES))
+    TAIL_BYTES=$ALIGN_REM
+    dd if=/dev/zero of="/dev/mapper/$MAP" bs=1 count=$TAIL_BYTES seek=$TAIL_OFFSET conv=fsync status=none
+  fi
+fi
 
 # Tear down: key vanishes with the mapping
 cryptsetup close "$MAP"
