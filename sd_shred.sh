@@ -4,13 +4,131 @@
 
 set -euo pipefail
 
+usage() {
+  echo "Usage: sudo $0 [device]"
+}
+
+trim() {
+  local value="${1-}"
+  value="${value#"${value%%[![:space:]]*}"}"
+  value="${value%"${value##*[![:space:]]}"}"
+  printf '%s' "$value"
+}
+
+declare -a SYSTEM_DISKS=()
+declare -A SYSTEM_DISK_SET=()
+
+add_system_disk() {
+  local disk="${1-}"
+  [[ -n "$disk" && -b "$disk" ]] || return 0
+  [[ -n "${SYSTEM_DISK_SET[$disk]+x}" ]] && return 0
+  SYSTEM_DISK_SET["$disk"]=1
+  SYSTEM_DISKS+=("$disk")
+}
+
+collect_parent_disks() {
+  local source="${1-}"
+  [[ -n "$source" ]] || return 0
+
+  while read -r path dev_type; do
+    [[ "$dev_type" == "disk" ]] && add_system_disk "$path"
+  done < <(lsblk -s -nro PATH,TYPE "$source" 2>/dev/null || true)
+}
+
+discover_system_disks() {
+  local mountpoint source
+
+  for mountpoint in / /boot /boot/efi; do
+    source="$(findmnt -nro SOURCE "$mountpoint" 2>/dev/null || true)"
+    source="$(trim "$source")"
+    [[ -n "$source" ]] && collect_parent_disks "$source"
+  done
+}
+
+is_system_disk() {
+  local disk="${1-}"
+  [[ -n "${SYSTEM_DISK_SET[$disk]+x}" ]]
+}
+
+describe_disk() {
+  local disk="${1-}"
+  local size model transport
+
+  size="$(trim "$(lsblk -ndo SIZE "$disk" 2>/dev/null || true)")"
+  model="$(trim "$(lsblk -ndo MODEL "$disk" 2>/dev/null || true)")"
+  transport="$(trim "$(lsblk -ndo TRAN "$disk" 2>/dev/null || true)")"
+
+  printf '%s' "${size:-unknown size}"
+  [[ -n "$transport" ]] && printf ' | %s' "$transport"
+  [[ -n "$model" ]] && printf ' | %s' "$model"
+}
+
+select_device() {
+  local choice disk dev_type
+  local -a candidates=()
+
+  while read -r disk dev_type; do
+    [[ "$dev_type" == "disk" ]] || continue
+    is_system_disk "$disk" && continue
+    candidates+=("$disk")
+  done < <(lsblk -dnpo PATH,TYPE)
+
+  if (( ${#candidates[@]} == 0 )); then
+    echo "❌ No eligible non-system disks were found."
+    exit 1
+  fi
+
+  echo "🧭 Select a disk to shred:"
+  for i in "${!candidates[@]}"; do
+    printf '  %d) %s | %s\n' "$((i + 1))" "${candidates[$i]}" "$(describe_disk "${candidates[$i]}")"
+  done
+  if (( ${#SYSTEM_DISKS[@]} > 0 )); then
+    echo "🔒 Excluded system disks: ${SYSTEM_DISKS[*]}"
+  fi
+
+  while true; do
+    read -rp "Select disk number to shred (or q to quit): " choice
+    case "$choice" in
+      q|Q)
+        echo "Aborted."
+        exit 1
+        ;;
+      ''|*[!0-9]*)
+        echo "❌ Invalid selection."
+        ;;
+      *)
+        if (( choice >= 1 && choice <= ${#candidates[@]} )); then
+          DEVICE="${candidates[$((choice - 1))]}"
+          return 0
+        fi
+        echo "❌ Invalid selection."
+        ;;
+    esac
+  done
+}
+
 DEVICE="${1-}"
-[[ -z "$DEVICE" || ! -b "$DEVICE" ]] && { echo "Usage: sudo $0 /dev/sdX"; exit 1; }
+discover_system_disks
+
+if [[ -z "$DEVICE" ]]; then
+  select_device
+elif [[ ! -b "$DEVICE" ]]; then
+  usage
+  exit 1
+fi
 
 DEV_TYPE="$(lsblk -ndo TYPE "$DEVICE" 2>/dev/null || true)"
 if [[ "$DEV_TYPE" != "disk" ]]; then
   echo "❌ Refusing to run on $DEVICE (type: ${DEV_TYPE:-unknown})."
   echo "👉 Please pass the whole device (e.g., /dev/sda), not a partition (e.g., /dev/sda1)."
+  exit 1
+fi
+
+if is_system_disk "$DEVICE"; then
+  echo "❌ Refusing to run on system disk $DEVICE."
+  if (( ${#SYSTEM_DISKS[@]} > 0 )); then
+    echo "🔒 System disks: ${SYSTEM_DISKS[*]}"
+  fi
   exit 1
 fi
 
