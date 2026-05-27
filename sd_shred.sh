@@ -320,3 +320,6 @@ echo "🧩 Creating one FAT32 partition with label \"$FAT32_LABEL\"..."
 echo
 echo "📦 Current device state:"
 lsblk -o NAME,TYPE,SIZE,FSTYPE,LABEL,MOUNTPOINT | grep -E "$(basename "$DEVICE")"
+read -rn 1 -s -p "Press any key to close this window..."
+echo
+exit 1
