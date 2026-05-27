@@ -6,6 +6,7 @@ set -euo pipefail
 
 usage() {
   echo "Usage: sudo $0 [device]"
+  echo "If no device is provided, you will be prompted to select the target drive."
 }
 
 trim() {
@@ -20,10 +21,20 @@ declare -A SYSTEM_DISK_SET=()
 
 add_system_disk() {
   local disk="${1-}"
-  [[ -n "$disk" && -b "$disk" ]] || return 0
+  [[ -n "$disk" ]] || return 0
   [[ -n "${SYSTEM_DISK_SET[$disk]+x}" ]] && return 0
   SYSTEM_DISK_SET["$disk"]=1
   SYSTEM_DISKS+=("$disk")
+}
+
+lsblk_pair_value() {
+  local line="${1-}"
+  local key="${2-}"
+  local rest
+
+  rest="${line#*${key}=\"}"
+  [[ "$rest" != "$line" ]] || return 1
+  printf '%s' "${rest%%\"*}"
 }
 
 collect_parent_disks() {
@@ -35,6 +46,28 @@ collect_parent_disks() {
   done < <(lsblk -s -nro PATH,TYPE "$source" 2>/dev/null || true)
 }
 
+discover_system_disks_from_lsblk_mounts() {
+  local line path pkname dev_type mountpoints mount
+
+  while IFS= read -r line; do
+    path="$(lsblk_pair_value "$line" "PATH" || true)"
+    pkname="$(lsblk_pair_value "$line" "PKNAME" || true)"
+    dev_type="$(lsblk_pair_value "$line" "TYPE" || true)"
+    mountpoints="$(lsblk_pair_value "$line" "MOUNTPOINTS" || true)"
+
+    [[ -n "$path" && -n "$dev_type" && -n "$mountpoints" ]] || continue
+
+    for mount in / /boot /boot/efi; do
+      [[ "$mountpoints" == "$mount" ]] || continue
+      if [[ "$dev_type" == "disk" ]]; then
+        add_system_disk "$path"
+      elif [[ -n "$pkname" ]]; then
+        add_system_disk "/dev/$pkname"
+      fi
+    done
+  done < <(lsblk -P -o PATH,PKNAME,TYPE,MOUNTPOINTS 2>/dev/null || true)
+}
+
 discover_system_disks() {
   local mountpoint source
 
@@ -43,6 +76,8 @@ discover_system_disks() {
     source="$(trim "$source")"
     [[ -n "$source" ]] && collect_parent_disks "$source"
   done
+
+  discover_system_disks_from_lsblk_mounts
 }
 
 is_system_disk() {
@@ -50,17 +85,82 @@ is_system_disk() {
   [[ -n "${SYSTEM_DISK_SET[$disk]+x}" ]]
 }
 
+device_type_for() {
+  local disk="${1-}"
+  local dev_type path
+
+  dev_type="$(lsblk -ndo TYPE "$disk" 2>/dev/null || true)"
+  dev_type="$(trim "$dev_type")"
+  if [[ -n "$dev_type" ]]; then
+    printf '%s' "$dev_type"
+    return 0
+  fi
+
+  while read -r path dev_type; do
+    [[ "$path" == "$disk" ]] || continue
+    printf '%s' "$dev_type"
+    return 0
+  done < <(lsblk -dnpo PATH,TYPE 2>/dev/null || true)
+}
+
 describe_disk() {
   local disk="${1-}"
-  local size model transport
+  local size model transport labels
 
   size="$(trim "$(lsblk -ndo SIZE "$disk" 2>/dev/null || true)")"
   model="$(trim "$(lsblk -ndo MODEL "$disk" 2>/dev/null || true)")"
   transport="$(trim "$(lsblk -ndo TRAN "$disk" 2>/dev/null || true)")"
+  labels="$(describe_disk_labels "$disk")"
 
   printf '%s' "${size:-unknown size}"
+  [[ -n "$labels" ]] && printf ' | labels: %s' "$labels"
   [[ -n "$transport" ]] && printf ' | %s' "$transport"
   [[ -n "$model" ]] && printf ' | %s' "$model"
+}
+
+describe_disk_labels() {
+  local disk="${1-}"
+  local disk_name line path pkname label partlabel value
+  local -a labels=()
+
+  disk_name="$(basename "$disk")"
+
+  while IFS= read -r line; do
+    path="$(lsblk_pair_value "$line" "PATH" || true)"
+    pkname="$(lsblk_pair_value "$line" "PKNAME" || true)"
+    label="$(lsblk_pair_value "$line" "LABEL" || true)"
+    partlabel="$(lsblk_pair_value "$line" "PARTLABEL" || true)"
+
+    [[ "$path" == "$disk" || "$pkname" == "$disk_name" ]] || continue
+
+    for value in "$label" "$partlabel"; do
+      [[ -n "$value" ]] || continue
+      labels+=("$value")
+    done
+  done < <(lsblk -P -o PATH,PKNAME,LABEL,PARTLABEL 2>/dev/null || true)
+
+  if (( ${#labels[@]} > 0 )); then
+    local IFS=', '
+    printf '%s' "${labels[*]}"
+  fi
+}
+
+prompt_fat32_label() {
+  local label
+
+  while true; do
+    read -rp "Enter FAT32 label for the reformatted drive (max 11 chars): " label
+    label="$(trim "$label")"
+
+    if [[ -z "$label" ]]; then
+      echo "❌ Label cannot be empty."
+    elif (( ${#label} > 11 )); then
+      echo "❌ FAT32 labels are limited to 11 characters."
+    else
+      FAT32_LABEL="$label"
+      return 0
+    fi
+  done
 }
 
 select_device() {
@@ -78,7 +178,7 @@ select_device() {
     exit 1
   fi
 
-  echo "🧭 Select a disk to shred:"
+  echo "🧭 Select the drive to encrypt and overwrite:"
   for i in "${!candidates[@]}"; do
     printf '  %d) %s | %s\n' "$((i + 1))" "${candidates[$i]}" "$(describe_disk "${candidates[$i]}")"
   done
@@ -87,7 +187,7 @@ select_device() {
   fi
 
   while true; do
-    read -rp "Select disk number to shred (or q to quit): " choice
+    read -rp "Select drive number to encrypt and overwrite (or q to quit): " choice
     case "$choice" in
       q|Q)
         echo "Aborted."
@@ -108,6 +208,7 @@ select_device() {
 }
 
 DEVICE="${1-}"
+FAT32_LABEL=""
 discover_system_disks
 
 if [[ -z "$DEVICE" ]]; then
@@ -117,7 +218,7 @@ elif [[ ! -b "$DEVICE" ]]; then
   exit 1
 fi
 
-DEV_TYPE="$(lsblk -ndo TYPE "$DEVICE" 2>/dev/null || true)"
+DEV_TYPE="$(device_type_for "$DEVICE")"
 if [[ "$DEV_TYPE" != "disk" ]]; then
   echo "❌ Refusing to run on $DEVICE (type: ${DEV_TYPE:-unknown})."
   echo "👉 Please pass the whole device (e.g., /dev/sda), not a partition (e.g., /dev/sda1)."
@@ -132,7 +233,17 @@ if is_system_disk "$DEVICE"; then
   exit 1
 fi
 
+prompt_fat32_label
+
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+FAT32_SCRIPT="$SCRIPT_DIR/sd_fat32.sh"
+if [[ ! -x "$FAT32_SCRIPT" ]]; then
+  echo "❌ Missing or non-executable formatter script: $FAT32_SCRIPT"
+  exit 1
+fi
+
 echo "⚠️  This will overwrite ALL sectors on $DEVICE through dm-crypt (slow, but correct)."
+echo "Afterwards it will repartition $DEVICE as FAT32 with label \"$FAT32_LABEL\"."
 read -rp "Type YES to proceed: " CONFIRM
 [[ "$CONFIRM" != "YES" ]] && { echo "Aborted."; exit 1; }
 
@@ -197,5 +308,8 @@ wipefs -a "$DEVICE" || true
 
 echo "✅ Done: prior plaintext is now unrecoverable (headerless crypto-erase completed)."
 echo
+echo "🧩 Creating one FAT32 partition with label \"$FAT32_LABEL\"..."
+"$FAT32_SCRIPT" --yes "$DEVICE" "$FAT32_LABEL"
+echo
 echo "📦 Current device state:"
-lsblk -o NAME,TYPE,SIZE,FSTYPE,MOUNTPOINT | grep -E "$(basename "$DEVICE")"
+lsblk -o NAME,TYPE,SIZE,FSTYPE,LABEL,MOUNTPOINT | grep -E "$(basename "$DEVICE")"
