@@ -180,7 +180,6 @@ select_device() {
   if (( ${#candidates[@]} == 0 )); then
     echo "❌ No eligible non-system disks were found."
     read -rn 1 -s -p "Press any key to close this window..."
-    echo
     exit 1
   fi
 
@@ -221,6 +220,7 @@ if [[ -z "$DEVICE" ]]; then
   select_device
 elif [[ ! -b "$DEVICE" ]]; then
   usage
+  read -rn 1 -s -p "Press any key to close this window..."
   exit 1
 fi
 
@@ -228,6 +228,7 @@ DEV_TYPE="$(device_type_for "$DEVICE")"
 if [[ "$DEV_TYPE" != "disk" ]]; then
   echo "❌ Refusing to run on $DEVICE (type: ${DEV_TYPE:-unknown})."
   echo "👉 Please pass the whole device (e.g., /dev/sda), not a partition (e.g., /dev/sda1)."
+  read -rn 1 -s -p "Press any key to close this window..."
   exit 1
 fi
 
@@ -236,6 +237,7 @@ if is_system_disk "$DEVICE"; then
   if (( ${#SYSTEM_DISKS[@]} > 0 )); then
     echo "🔒 System disks: ${SYSTEM_DISKS[*]}"
   fi
+  read -rn 1 -s -p "Press any key to close this window..."
   exit 1
 fi
 
@@ -245,6 +247,7 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 FAT32_SCRIPT="$SCRIPT_DIR/sd_fat32.sh"
 if [[ ! -x "$FAT32_SCRIPT" ]]; then
   echo "❌ Missing or non-executable formatter script: $FAT32_SCRIPT"
+  read -rn 1 -s -p "Press any key to close this window..."
   exit 1
 fi
 
@@ -257,7 +260,9 @@ read -rp "Type YES to proceed: " CONFIRM
 MOUNTED_INFO="$(lsblk -rno NAME,MOUNTPOINT "$DEVICE" | awk '$2!="" {print "/dev/"$1" -> "$2}')"
 if [[ -n "$MOUNTED_INFO" ]]; then
   echo "❌ Device/partitions are in use:"; echo "$MOUNTED_INFO"
-  echo "👉 Unmount (and swapoff) before retrying."; exit 1
+  echo "👉 Unmount (and swapoff) before retrying."; 
+  read -rn 1 -s -p "Press any key to close this window..."
+  exit 1
 fi
 
 # aes-xts-plain64 with 512-bit key (256-bit per XTS half)
@@ -321,5 +326,4 @@ echo
 echo "📦 Current device state:"
 lsblk -o NAME,TYPE,SIZE,FSTYPE,LABEL,MOUNTPOINT | grep -E "$(basename "$DEVICE")"
 read -rn 1 -s -p "Press any key to close this window..."
-echo
 exit 1
