@@ -5,9 +5,13 @@
 set -euo pipefail
 
 usage() {
-  echo "Usage: sudo $0 [device]"
+  echo "Usage: $0 [device]"
   echo "If no device is provided, you will be prompted to select the target drive."
 }
+
+if (( EUID != 0 )); then
+  exec sudo -- "$BASH" "$0" "$@"
+fi
 
 trim() {
   local value="${1-}"
@@ -175,6 +179,8 @@ select_device() {
 
   if (( ${#candidates[@]} == 0 )); then
     echo "❌ No eligible non-system disks were found."
+    read -rn 1 -s -p "Press any key to close this window..."
+    echo
     exit 1
   fi
 
