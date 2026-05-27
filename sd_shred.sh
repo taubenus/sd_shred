@@ -268,6 +268,7 @@ cryptsetup close "$MAP" 2>/dev/null || dmsetup remove -f "$MAP" 2>/dev/null || t
 # Create a headerless dm-crypt mapping with a throwaway random key
 cryptsetup open --type plain \
   --cipher aes-xts-plain64 --key-size 512 \
+  --batch-mode \
   --key-file /dev/urandom \
   "$DEVICE" "$MAP"
 
